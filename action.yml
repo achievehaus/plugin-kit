@@ -1,0 +1,44 @@
+name: Set up the Achievehaus plugin kit
+description: Puts `achievehaus-plugin` on PATH, from the kit's public release (v<version>).
+
+# A plugin's own workflow (the one `achievehaus-plugin new` writes) calls this,
+# so a plugin author never builds the kit. It is not used from here: the
+# release workflow (.github/workflows/sdk-release.yml) copies it to the root
+# of the public kit repository (default achievehaus/plugin-kit), tags it
+# v<version> beside the release whose binaries it downloads, and writes that
+# repository into `repository`'s default. A project's workflow then says
+#     uses: achievehaus/plugin-kit@v0.1.0
+# This repository is private: an author's run could fetch neither this action
+# nor a release from it (#257).
+
+inputs:
+  version:
+    description: The kit's version, e.g. 0.1.0 -- the release tagged v<version>.
+    required: true
+  repository:
+    description: The public repository the kit is released to.
+    # Rewritten by sdk-release.yml to the host it releases to.
+    default: achievehaus/plugin-kit
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        KIT_VERSION: ${{ inputs.version }}
+        KIT_REPO: ${{ inputs.repository }}
+      run: |
+        set -euo pipefail
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+          Linux-X64) target=x86_64-linux; ext=tar.gz ;;
+          Windows-X64) target=x86_64-windows; ext=zip ;;
+          macOS-ARM64) target=arm64-macos; ext=tar.gz ;;
+          *) echo "::error::there is no plugin kit build for $RUNNER_OS $RUNNER_ARCH"; exit 1 ;;
+        esac
+        dir="$RUNNER_TEMP/achievehaus-plugin"
+        mkdir -p "$dir"
+        url="https://github.com/$KIT_REPO/releases/download/v$KIT_VERSION/achievehaus-plugin-$target.$ext"
+        curl -fsSL --retry 3 "$url" -o "$dir/kit.$ext" || { echo "::error::could not download $url"; exit 1; }
+        if [ "$ext" = zip ]; then unzip -q -o "$dir/kit.zip" -d "$dir"; else tar -xzf "$dir/kit.tar.gz" -C "$dir"; fi
+        echo "$dir" >> "$GITHUB_PATH"
+        "$dir/achievehaus-plugin" --version

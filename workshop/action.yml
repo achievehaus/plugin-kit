@@ -1,0 +1,127 @@
+name: Publish an Achievehaus plugin to the Steam Workshop
+description: Uploads a packed plugin folder (dist/<id>/) as a new version of its Workshop item, with SteamCMD, and sets the item's tags from its source.json.
+
+# A shipped plugin's own workflow (the plugin.yml `achievehaus-plugin new`
+# writes) calls this for a version tag. It is not used from here: the release
+# workflow (.github/workflows/sdk-release.yml) copies it, with
+# workshop_tags.py beside it, to `workshop/` in the public kit repository,
+# tagged with the kit:
+#     uses: achievehaus/plugin-kit/workshop@v0.1.0
+#
+# Linux runners only (SteamCMD's Linux build). It only ever updates an item
+# that exists: SteamCMD writes a new item's id back into its VDF, which a CI
+# run throws away, so an upload without an id would make a new item on every
+# release (docs/plugins/workshop-findings.md, "Publishing"). The item is made
+# once by hand and its id set as the repository variable WORKSHOP_ITEM_ID
+# (WORKSHOP_PREVIEW_ITEM_ID for pre-releases: docs/plugins/publishing.md).
+# Its title, description, preview and visibility are left as they are on
+# Steam; only the content, a change note and the kit's tags are sent.
+#
+# Tags: SteamCMD's VDF has no documented key for them, so they are set after
+# the upload through the partner Web API (workshop_tags.py), which takes a
+# publisher key. Without one the upload still happens and a warning lists
+# the tags it did not set (docs/plugins/workshop-findings.md, "Tags").
+
+inputs:
+  content:
+    description: The folder that ships, as `achievehaus-plugin pack` writes it (dist/<id>).
+    required: true
+  item-id:
+    description: The Workshop item's published file id (vars.WORKSHOP_ITEM_ID, or vars.WORKSHOP_PREVIEW_ITEM_ID for a pre-release).
+    required: true
+  changenote:
+    description: What Steam shows for this version.
+    required: true
+  tags:
+    description: The item's tags, comma-separated, as `achievehaus-plugin tags` prints them. The item's tags under game:, provider:, role: and api: are made equal to these; any other tag on it is left alone.
+    default: ""
+  app-id:
+    description: Achievehaus's Steam App ID.
+    default: "5406160"
+  steam-username:
+    description: The Steam account that uploads (secrets.STEAM_USERNAME); it needs Workshop rights on the app.
+    required: true
+  steam-config-vdf:
+    description: Base64 of that account's config.vdf after a SteamCMD login (secrets.STEAM_CONFIG_VDF); it stands in for Steam Guard.
+    required: true
+  steam-tags-key:
+    description: A Steamworks publisher Web API key for the app (secrets.STEAM_TAGS_KEY), which sets the tags. Optional; without it the tags are listed, not set.
+    default: ""
+  dry-run:
+    description: "true: check the inputs and print what would be sent; run no SteamCMD and ask Steam nothing."
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        CONTENT: ${{ inputs.content }}
+        ITEM_ID: ${{ inputs.item-id }}
+        CHANGENOTE: ${{ inputs.changenote }}
+        APP_ID: ${{ inputs.app-id }}
+        STEAM_USERNAME: ${{ inputs.steam-username }}
+        STEAM_CONFIG_VDF: ${{ inputs.steam-config-vdf }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        set -euo pipefail
+        [ "$RUNNER_OS" = Linux ] || { echo "::error::publishing to the Workshop runs on Linux"; exit 1; }
+        case "$ITEM_ID" in
+          '' | *[!0-9]*)
+            echo "::error::no Workshop item id: make the item once by hand and set the repository variable WORKSHOP_ITEM_ID (WORKSHOP_PREVIEW_ITEM_ID for a pre-release) to its number (docs/plugins/publishing.md)"
+            exit 1 ;;
+        esac
+        if [ "$DRY_RUN" != true ]; then
+          [ -n "$STEAM_USERNAME" ] && [ -n "$STEAM_CONFIG_VDF" ] \
+            || { echo "::error::STEAM_USERNAME and STEAM_CONFIG_VDF are not set for this repository"; exit 1; }
+        fi
+        [ -f "$CONTENT/source.json" ] || { echo "::error::$CONTENT is not a packed plugin (no source.json)"; exit 1; }
+        content=$(cd "$CONTENT" && pwd)
+
+        # The session goes into a HOME of this run's own.
+        work=$(mktemp -d "$RUNNER_TEMP/workshop.XXXXXX")
+        trap 'rm -rf "$work"' EXIT
+        # A change note in a VDF string: no quotes, one line.
+        note=$(printf '%s' "$CHANGENOTE" | tr '"\r\n' "'  ")
+        cat > "$work/item.vdf" <<EOF
+        "workshopitem"
+        {
+          "appid" "$APP_ID"
+          "publishedfileid" "$ITEM_ID"
+          "contentfolder" "$content"
+          "changenote" "$note"
+        }
+        EOF
+        cat "$work/item.vdf"
+        if [ "$DRY_RUN" = true ]; then
+          echo "dry run: SteamCMD would upload $content to item $ITEM_ID"
+          exit 0
+        fi
+
+        tools="$RUNNER_TOOL_CACHE/steamcmd-linux"
+        if [ ! -x "$tools/steamcmd.sh" ]; then
+          # SteamCMD is 32-bit.
+          sudo apt-get install -y -qq lib32gcc-s1 > /dev/null
+          mkdir -p "$tools"
+          curl -fsSL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz | tar -xz -C "$tools"
+        fi
+        mkdir -p "$work/home/Steam/config"
+        printf '%s' "$STEAM_CONFIG_VDF" | base64 -d > "$work/home/Steam/config/config.vdf"
+        HOME="$work/home" "$tools/steamcmd.sh" +login "$STEAM_USERNAME" +workshop_build_item "$work/item.vdf" +quit \
+          | tee "$work/output.log"
+        # steamcmd exits 0 on some failures; its own words are the verdict.
+        if grep -q "ERROR" "$work/output.log" || ! grep -q "Success" "$work/output.log"; then
+          echo "::error::the Workshop upload did not finish -- see the log above"
+          exit 1
+        fi
+
+    # After the content: a release is its content, and tags that could not
+    # be set leave it up, saying so.
+    - shell: bash
+      env:
+        TAGS: ${{ inputs.tags }}
+        ITEM_ID: ${{ inputs.item-id }}
+        APP_ID: ${{ inputs.app-id }}
+        KEY: ${{ inputs.steam-tags-key }}
+        DRY_RUN: ${{ inputs.dry-run == 'true' && '1' || '' }}
+      run: python3 "$GITHUB_ACTION_PATH/workshop_tags.py"
