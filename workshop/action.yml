@@ -33,7 +33,7 @@ inputs:
     description: What Steam shows for this version.
     required: true
   tags:
-    description: The item's tags, comma-separated, as `achievehaus-plugin tags` prints them. The item's tags under game:, provider:, role: and api: are made equal to these; any other tag on it is left alone.
+    description: "The item's tags, comma-separated, as `achievehaus-plugin tags` prints them. The item's tags under game:, provider:, role: and api: are made equal to these; any other tag on it is left alone."
     default: ""
   app-id:
     description: Achievehaus's Steam App ID.
