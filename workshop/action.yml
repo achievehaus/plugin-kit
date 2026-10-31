@@ -15,12 +15,22 @@ description: Uploads a packed plugin folder (dist/<id>/) as a new version of its
 # once by hand and its id set as the repository variable WORKSHOP_ITEM_ID
 # (WORKSHOP_PREVIEW_ITEM_ID for pre-releases: docs/plugins/publishing.md).
 # Its title, description, preview and visibility are left as they are on
-# Steam; only the content, a change note and the kit's tags are sent.
+# Steam; only the content, a change note and the kit's tags are sent. The
+# change note is the release's own notes unless one is given
+# (change_note.py: the annotated tag's message, CHANGELOG.md's section, the
+# GitHub release's body), as BBCode, which Steam's change notes take.
 #
 # Tags: SteamCMD's VDF has no documented key for them, so they are set after
 # the upload through the partner Web API (workshop_tags.py), which takes a
 # publisher key. Without one the upload still happens and a warning lists
 # the tags it did not set (docs/plugins/workshop-findings.md, "Tags").
+#
+# Branch ranges (Workshop item versioning): not set here, and cannot be.
+# SteamCMD's VDF has no key for them and the Web API's update no field;
+# only ISteamUGC::SetRequiredGameVersions with a signed-in Steam client
+# does. An upload goes out with no range (every branch) and is narrowed by
+# hand on its page (docs/plugins/publishing.md, "Which app branches an
+# upload works on"; docs/plugins/workshop-findings.md, "Item versioning").
 
 inputs:
   content:
@@ -30,8 +40,17 @@ inputs:
     description: The Workshop item's published file id (vars.WORKSHOP_ITEM_ID, or vars.WORKSHOP_PREVIEW_ITEM_ID for a pre-release).
     required: true
   changenote:
-    description: What Steam shows for this version.
-    required: true
+    description: "What Steam shows for this version. Empty (the default): the release's own notes -- the version tag's message when it is annotated, else the version's section of CHANGELOG.md, else the GitHub release's body, else \"<name> <tag>\" -- as BBCode (change_note.py)."
+    default: ""
+  tag:
+    description: The version tag being released, for the change note.
+    default: ${{ github.ref_name }}
+  name:
+    description: "The plugin's name, for a change note with no notes to come from. Default: source.json's."
+    default: ""
+  token:
+    description: Reads the GitHub release's body, for the change note.
+    default: ${{ github.token }}
   tags:
     description: "The item's tags, comma-separated, as `achievehaus-plugin tags` prints them. The item's tags under game:, provider:, role: and api: are made equal to these; any other tag on it is left alone."
     default: ""
@@ -59,6 +78,9 @@ runs:
         CONTENT: ${{ inputs.content }}
         ITEM_ID: ${{ inputs.item-id }}
         CHANGENOTE: ${{ inputs.changenote }}
+        TAG: ${{ inputs.tag }}
+        NAME: ${{ inputs.name }}
+        TOKEN: ${{ inputs.token }}
         APP_ID: ${{ inputs.app-id }}
         STEAM_USERNAME: ${{ inputs.steam-username }}
         STEAM_CONFIG_VDF: ${{ inputs.steam-config-vdf }}
@@ -77,6 +99,11 @@ runs:
         fi
         [ -f "$CONTENT/source.json" ] || { echo "::error::$CONTENT is not a packed plugin (no source.json)"; exit 1; }
         content=$(cd "$CONTENT" && pwd)
+        # No note given: the release's own (change_note.py says which).
+        if [ -z "$CHANGENOTE" ]; then
+          [ -n "$NAME" ] || NAME=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["source"]["name"])' "$content/source.json")
+          CHANGENOTE=$(TAG="$TAG" NAME="$NAME" GH_TOKEN="$TOKEN" python3 "$GITHUB_ACTION_PATH/change_note.py")
+        fi
 
         # The session goes into a HOME of this run's own.
         work=$(mktemp -d "$RUNNER_TEMP/workshop.XXXXXX")
